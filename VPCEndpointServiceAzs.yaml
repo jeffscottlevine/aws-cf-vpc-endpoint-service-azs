@@ -1,0 +1,205 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: Lambda function that looks up available AZs for an AWS VPC Endpoint service.
+
+# VPCEndpointServicesAz.yaml
+#
+# This template includes a Lambda function that looks up the Availability Zones that offer
+# endpoint services.
+
+# Create a Lambda excution role for the Lambda function. Note that
+# there are permissions for DescribeVPCEndpointServices.
+
+Resources:
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: '/'
+      Policies:
+      - PolicyName: root
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: arn:aws:logs:*:*:*
+          - Effect: Allow
+            Action:
+            - ec2:DescribeVpcEndpointServices
+            Resource: '*'
+
+# VpcEndpointServiceAzaFunction
+#
+# This is the AWS Lambda function that supports a CloudFormation custom
+# resource that is used to look up the available Availability Zones for
+# a VPC interface endpoint service.  VPC interface endpoints may only be
+# offered in some, perhaps not all, AZs within a given region. This function
+# can help you to design CloudFormation templates that choose subnets based
+# on their ability to provide such endpoint interfaces.
+#
+# Resource properties (e.g. input "parameters") for the function:
+#
+# ServiceName - required - string - the name of the service.  This should be
+# something like 'com.amazonaws.us-east-1.secretsmanager'
+#
+# DesiredNumAzs - required - string - the minimum number of Availability Zones
+# that must offer the service (usually '2' or '3').  This should be a whole
+# number (i.e. a non-negative integer).
+#
+#
+# Return values via GetAtt:
+#
+# NumAzs - string - the number of Availability Zones that offer the interface
+# endpoint.
+#
+# Azs - string - a comma-separated list of the AZs.
+#
+#
+# Errors:
+#
+# If there are any errors, the Lambda function returns a FAILED status which
+# normally triggers a rollback in AWS CloudFormation.   You can see the errors
+# in the Amazon CloudWatch Logs.
+#
+# Notes:
+#
+# (1) Lambda function code inside of CloudFormation templates cannot exceed
+# 4096 characters.
+
+
+  VpcEndpointServiceAzsFunction:
+    Type: AWS::Lambda::Function
+    Properties: 
+      Description: 'Look up the AZs that are available for a VPC endpoint for a service'
+      Handler: index.handler
+      MemorySize: 128
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: 'python3.6'
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          import uuid
+          def handler(event, context):
+
+            responseData = {}      
+            responseData['StackId'] = event['StackId']
+            responseData['RequestId'] = event['RequestId']
+            responseData['LogicalResourceId'] = event['LogicalResourceId']
+
+            if event['RequestType'] == 'Delete':
+              responseData['Status'] = cfnresponse.SUCCESS
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+
+            try:
+              desiredNumAzsStr = event['ResourceProperties']['DesiredNumAzs']
+              desiredNumAzs = int(desiredNumAzsStr)
+            except:
+              responseData['Status'] = cfnresponse.FAILED
+              responseData['Reason'] = (
+                'DesiredNumAzs is required and must be a whole number'
+              )
+              print(responseData['Reason'])
+              cfnresponse.send(event, context, cfnresponse.FAILED, responseData)
+
+            if desiredNumAzs < 0:
+              responseData['Status'] = cfnresponse.FAILED
+              responseData['Reason'] = (
+                'DesiredNumAzs is required and must be a whole number'
+              )
+              print(responseData['Reason'])
+              cfnresponse.send(event, context, cfnresponse.FAILED, responseData)
+
+            try:
+              ec2=boto3.client('ec2')
+            except:
+              responseData['Status'] = cfnresponse.FAILED
+              responseData['Reason'] = 'unable to set up ec2 client'
+              print(responseData['Reason'])
+              cfnresponse.send(event, context, cfnresponse.FAILED, responseData)
+
+            try:
+              serviceName = event['ResourceProperties']['ServiceName']
+              response = ec2.describe_vpc_endpoint_services(
+                ServiceNames = [ serviceName ]
+              )
+            except:
+              responseData['Status'] = cfnresponse.FAILED
+              responseData['Reason'] = 'unable to rerieve endpoint service info'
+              print(responseData['Reason'])
+              cfnresponse.send(event, context, cfnresponse.FAILED, responseData)
+
+            numberOfServices = len(response['ServiceDetails'])
+            if numberOfServices != 1:
+              responseData['Status'] = cfnresponse.FAILED
+              responseData['Reason'] = (
+                'number of services should be 1 but is: ' +
+                str(numberOfServices)
+              )
+              print(responseData['Reason'])
+              cfnresponse.send(event, context, cfnresponse.FAILED, responseData)
+
+            Azs = response['ServiceDetails'][0]['AvailabilityZones']
+            numAzs = len(Azs)
+            if numAzs < desiredNumAzs:
+              responseData['Status'] = cfnresponse.FAILED
+              responseData['Reason'] = (
+                'insufficient number of availability zones - found: ' + 
+                str(numAzs)
+              )
+              print(responseData['Reason'])
+              cfnresponse.send(event, context, cfnresponse.FAILED, responseData)
+
+            responseData['Status'] = cfnresponse.SUCCESS
+            responseData['NumAzs'] = str(numAzs)
+            responseData['Azs'] = ','.join(Azs)
+            responseData['PhysicalResourceId'] = (
+              'VpcEndpointServiceAZs' +
+              str(uuid.uuid1())
+            )
+
+            cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+
+  VpcEndpointServiceAzs:
+    Type: Custom::VpcEndpointServiceAzs
+    Properties:
+      ServiceToken: !GetAtt VpcEndpointServiceAzsFunction.Arn
+      ServiceName:
+        !Join
+        - ''
+        - - 'com.amazonaws.'
+          - !Ref 'AWS::Region'
+          - '.secretsmanager'
+      DesiredNumAzs: 2
+
+Outputs:
+
+  NumAzs:
+    Description: Number of AZs with the VPC endpoint service
+    Value: !GetAtt VpcEndpointServiceAzs.NumAzs
+
+  Azs:
+    Description: AZs with the VPC endpoint service
+    Value: !GetAtt VpcEndpointServiceAzs.Azs
+
+  Az1:
+    Description: AZ1
+    Value: !Select [0, !Split [",", !GetAtt VpcEndpointServiceAzs.Azs]]
+
+  Az2:
+    Description: AZ2
+    Value: !Select [1, !Split [",", !GetAtt VpcEndpointServiceAzs.Azs]]
