@@ -94,6 +94,8 @@ Resources:
           import boto3
           import cfnresponse
           import uuid
+          import json
+
           def handler(event, context):
 
             responseData = {}      
@@ -104,6 +106,15 @@ Resources:
             if event['RequestType'] == 'Delete':
               responseData['Status'] = cfnresponse.SUCCESS
               cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+              return
+
+            # Since we are creating or updating the resource, create a new
+            # PhysicalResourceId.
+            
+            responseData['PhysicalResourceId'] = (
+              'VpcEndpointServiceAZs' +
+              str(uuid.uuid1())
+            )
 
             try:
               desiredNumAzsStr = event['ResourceProperties']['DesiredNumAzs']
@@ -115,6 +126,7 @@ Resources:
               )
               print(responseData['Reason'])
               cfnresponse.send(event, context, cfnresponse.FAILED, responseData)
+              return
 
             if desiredNumAzs < 0:
               responseData['Status'] = cfnresponse.FAILED
@@ -123,6 +135,7 @@ Resources:
               )
               print(responseData['Reason'])
               cfnresponse.send(event, context, cfnresponse.FAILED, responseData)
+              return
 
             try:
               ec2=boto3.client('ec2')
@@ -131,7 +144,8 @@ Resources:
               responseData['Reason'] = 'unable to set up ec2 client'
               print(responseData['Reason'])
               cfnresponse.send(event, context, cfnresponse.FAILED, responseData)
-
+              return
+            
             try:
               serviceName = event['ResourceProperties']['ServiceName']
               response = ec2.describe_vpc_endpoint_services(
@@ -142,7 +156,10 @@ Resources:
               responseData['Reason'] = 'unable to rerieve endpoint service info'
               print(responseData['Reason'])
               cfnresponse.send(event, context, cfnresponse.FAILED, responseData)
-
+              return
+            
+            print(json.dumps(response))
+            
             numberOfServices = len(response['ServiceDetails'])
             if numberOfServices != 1:
               responseData['Status'] = cfnresponse.FAILED
@@ -152,7 +169,8 @@ Resources:
               )
               print(responseData['Reason'])
               cfnresponse.send(event, context, cfnresponse.FAILED, responseData)
-
+              return
+            
             Azs = response['ServiceDetails'][0]['AvailabilityZones']
             numAzs = len(Azs)
             if numAzs < desiredNumAzs:
@@ -163,16 +181,14 @@ Resources:
               )
               print(responseData['Reason'])
               cfnresponse.send(event, context, cfnresponse.FAILED, responseData)
-
+              return
+            
             responseData['Status'] = cfnresponse.SUCCESS
             responseData['NumAzs'] = str(numAzs)
             responseData['Azs'] = ','.join(Azs)
-            responseData['PhysicalResourceId'] = (
-              'VpcEndpointServiceAZs' +
-              str(uuid.uuid1())
-            )
-
+            
             cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+            return
 
   VpcEndpointServiceAzs:
     Type: Custom::VpcEndpointServiceAzs
